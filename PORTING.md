@@ -10,7 +10,24 @@ Constraint notes that shaped many verdicts:
 - No gateway initiation: `onSend` mutates outgoing ops 3/4 only, plugins cannot send frames.
 - No fs/crypto/TextEncoder: pure-JS implementations or impossible, per case.
 
-## Ported (13)
+## Your enabled Vencord plugins: coverage
+
+Extracted from `%APPDATA%\Vencord\settings\settings.json` (35 enabled, of which 15 are
+Vencord-internal plumbing like CommandsAPI/BadgeAPI/NoTrack that exist only to support
+the web client and have no meaning in Phoenix).
+
+| Enabled plugin | Status in Phoenix |
+|---|---|
+| MessageChecker, AntiCrash, GlobalSearch, LocalEdit, QuestCompleter, SilentDelete, TokenGuard | ported, running |
+| RelationshipNotifier, ReadAllNotificationsButton, MutualGroupDMs | ported as gateway events + slash commands |
+| OnePingPerDM | impossible, no notification hook surface |
+| CopyImageFix, JunkCleanup, DevtoolsWarningHider | impossible, DOM/CSS patches |
+| MultiInstance, UnlimitedAccounts, TokenLogin | impossible, Electron process/storage tricks |
+| PresenceSpoofer | impossible, Identify op 2 unhookable |
+| BadgeFarmer | impossible, fakes telemetry through flux/native |
+| TokenImporter | blocked on fs access, needs a runtime fork |
+
+## Ported (16)
 
 | Plugin | Notes |
 |---|---|
@@ -26,6 +43,9 @@ Constraint notes that shaped many verdicts:
 | globalSearch | REST search core via `/gsearch`, `/gsearchdms` |
 | customRpc | Custom activity injected into outgoing op 3 on send |
 | questCompleter | REST video-progress + heartbeat core, verified against `/quests/@me` |
+| relationshipNotifier | Friend/server/group removal alerts via gateway events + native notify |
+| readAllNotifications | `/readall` acks the latest known message in every cached channel |
+| mutualGroupDMs | `/mutualgds <userId>` lists shared group DMs from the gateway cache |
 | zzSmokeTest | Runtime smoke test |
 
 ## Not portable (impossible with the current API)
