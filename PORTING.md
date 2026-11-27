@@ -10,7 +10,7 @@ Constraint notes that shaped many verdicts:
 - No gateway initiation: `onSend` mutates outgoing ops 3/4 only, plugins cannot send frames.
 - No fs/crypto/TextEncoder: pure-JS implementations or impossible, per case.
 
-## Ported (12)
+## Ported (13)
 
 | Plugin | Notes |
 |---|---|
@@ -25,6 +25,7 @@ Constraint notes that shaped many verdicts:
 | tokenGuard | Session-watch half only (localStorage trap is web-specific) |
 | globalSearch | REST search core via `/gsearch`, `/gsearchdms` |
 | customRpc | Custom activity injected into outgoing op 3 on send |
+| questCompleter | REST video-progress + heartbeat core, verified against `/quests/@me` |
 | zzSmokeTest | Runtime smoke test |
 
 ## Not portable (impossible with the current API)
@@ -40,12 +41,18 @@ Constraint notes that shaped many verdicts:
 | devtoolsWarningHider | Phoenix has no devtools scam warning |
 | junkCleanup | Collection of webpack/DOM patches |
 | cleanCord | Webpack/DOM cleanup patches |
-| questCompleter | Depends on discord's internal stores/action creators |
 | licenseManager | Keybind + webpack internals |
 | followUser | Needs voice-connection internals and context-menu patching |
-| badgeFarmer | Webpack store scanning, no equivalent surface |
+| badgeFarmer | Fakes game-session telemetry through flux/native, not REST |
 | streamHijack | No stream interception surface |
 | fakeSoundboard | Soundboard picker is native UI with no patch surface |
-| tokenImporter | No filesystem access in the sandbox |
 | vAnalyzer | React accessory UI + webpack stores |
 | _nightcordShims | Vencord-internal i18n shim, meaningless here |
+
+## Blocked on runtime extensions (possible only by forking Sunbird's Rust crates)
+
+| Plugin | Missing primitive |
+|---|---|
+| tokenImporter | Filesystem access (scanning local installs for tokens) |
+| statusRotator auto-rotation | Timers (currently manual/event-paced instead) |
+| tokenGuard 5-min polling | Timers (currently startup + manual check instead) |
