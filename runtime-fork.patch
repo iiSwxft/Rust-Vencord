@@ -1,0 +1,304 @@
+diff --git a/crates/runtime/src/js/files.rs b/crates/runtime/src/js/files.rs
+new file mode 100644
+index 0000000..17f63a7
+--- /dev/null
++++ b/crates/runtime/src/js/files.rs
+@@ -0,0 +1,128 @@
++//! `phoenix.fs`, direct filesystem access for plugins that scan or manage
++//! local files. Synchronous: reads and writes run on the engine thread, which
++//! is fine for the small files these plugins touch.
++
++use std::{
++   fs,
++   path::Path,
++};
++
++use rquickjs::{
++   Ctx,
++   Function,
++   Object,
++};
++
++const B64: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
++
++fn base64_encode(bytes: &[u8]) -> String {
++   let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
++   for chunk in bytes.chunks(3) {
++      let b0 = u32::from(chunk[0]);
++      let b1 = u32::from(*chunk.get(1).unwrap_or(&0));
++      let b2 = u32::from(*chunk.get(2).unwrap_or(&0));
++      let n = (b0 << 16) | (b1 << 8) | b2;
++      out.push(B64[(n >> 18) as usize & 63] as char);
++      out.push(B64[(n >> 12) as usize & 63] as char);
++      out.push(if chunk.len() > 1 { B64[(n >> 6) as usize & 63] as char } else { '=' });
++      out.push(if chunk.len() > 2 { B64[n as usize & 63] as char } else { '=' });
++   }
++   out
++}
++
++fn io_throw(ctx: &Ctx<'_>, path: &str, err: std::io::Error) -> rquickjs::Error {
++   crate::js::throw(ctx, &crate::io_error(Path::new(path))(err))
++}
++
++fn stat_json(path: &str) -> String {
++   match fs::metadata(path) {
++      Ok(meta) => {
++         let mtime = meta
++            .modified()
++            .ok()
++            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
++            .map_or(0, |d| d.as_millis() as u64);
++         serde_json::json!({
++            "exists": true,
++            "isDir": meta.is_dir(),
++            "isFile": meta.is_file(),
++            "size": meta.len(),
++            "mtimeMs": mtime,
++         })
++         .to_string()
++      },
++      Err(_) => serde_json::json!({ "exists": false }).to_string(),
++   }
++}
++
++fn read_dir_json(path: &str) -> Result<String, std::io::Error> {
++   let entries: Vec<serde_json::Value> = fs::read_dir(path)?
++      .filter_map(Result::ok)
++      .map(|entry| {
++         let meta = entry.metadata().ok();
++         serde_json::json!({
++            "name": entry.file_name().to_string_lossy(),
++            "isDir": meta.as_ref().is_some_and(fs::Metadata::is_dir),
++            "size": meta.as_ref().map_or(0, fs::Metadata::len),
++         })
++      })
++      .collect();
++   Ok(serde_json::to_string(&entries).unwrap_or_else(|_| "[]".to_owned()))
++}
++
++/// `phoenix.fs` for one plugin.
++pub fn fs_object<'js>(ctx: &Ctx<'js>) -> rquickjs::Result<Object<'js>> {
++   let object = Object::new(ctx.clone())?;
++
++   object.set(
++      "readText",
++      Function::new(ctx.clone(), |ctx: Ctx<'js>, path: String| {
++         match fs::read_to_string(&path) {
++            Ok(text) => Ok(text),
++            Err(err) => Err(io_throw(&ctx, &path, err)),
++         }
++      })?,
++   )?;
++
++   object.set(
++      "readBase64",
++      Function::new(ctx.clone(), |ctx: Ctx<'js>, path: String| {
++         match fs::read(&path) {
++            Ok(bytes) => Ok(base64_encode(&bytes)),
++            Err(err) => Err(io_throw(&ctx, &path, err)),
++         }
++      })?,
++   )?;
++
++   object.set(
++      "writeText",
++      Function::new(ctx.clone(), |ctx: Ctx<'js>, path: String, text: String| {
++         if let Some(parent) = Path::new(&path).parent() {
++            if let Err(err) = fs::create_dir_all(parent) {
++               return Err(io_throw(&ctx, &path, err));
++            }
++         }
++         match fs::write(&path, text) {
++            Ok(()) => Ok(()),
++            Err(err) => Err(io_throw(&ctx, &path, err)),
++         }
++      })?,
++   )?;
++
++   object.set(
++      "readDir",
++      Function::new(ctx.clone(), |ctx: Ctx<'js>, path: String| {
++         match read_dir_json(&path) {
++            Ok(json) => ctx.json_parse(json),
++            Err(err) => Err(io_throw(&ctx, &path, err)),
++         }
++      })?,
++   )?;
++
++   object.set(
++      "stat",
++      Function::new(ctx.clone(), |ctx: Ctx<'js>, path: String| ctx.json_parse(stat_json(&path)))?,
++   )?;
++
++   Ok(object)
++}
+diff --git a/crates/runtime/src/js/mod.rs b/crates/runtime/src/js/mod.rs
+index 96c28e2..3384428 100644
+--- a/crates/runtime/src/js/mod.rs
++++ b/crates/runtime/src/js/mod.rs
+@@ -1,10 +1,12 @@
+ pub mod background;
++mod files;
+ mod hooks;
+ pub mod http;
+ mod intercept;
+ pub mod messages;
+ mod settings;
+ mod storage;
++pub mod timers;
+ 
+ use std::{
+    borrow::Cow,
+@@ -162,6 +164,9 @@ pub struct Registry<'js> {
+    gateway_send_hooks: RefCell<HashMap<u64, (String, Function<'js>)>>,
+    /// `phoenix.messages.onSend` interceptors in registration order, by id.
+    pub interceptors:   RefCell<Vec<(u64, String, Function<'js>)>>,
++   /// Live `setTimeout`/`setInterval` callbacks, with the repeat delay for
++   /// intervals.
++   timers:             RefCell<HashMap<u64, (Function<'js>, Option<u64>)>>,
+ }
+ 
+ // SAFETY: every field is bound to 'js, and Changed swaps exactly that lifetime.
+@@ -202,6 +207,7 @@ impl Engine {
+          let registry = registry(&ctx, events).catch(&ctx).map_err(js_error)?;
+          ctx.store_userdata(registry)
+             .map_err(|err| Error::Js(err.to_string()))?;
++         timers::add_timer_globals(&ctx).catch(&ctx).map_err(js_error)?;
+          if let Some(platform) = crate::platform() {
+             platform.init(&ctx).catch(&ctx).map_err(js_error)?;
+          }
+@@ -532,6 +538,7 @@ fn registry<'js>(ctx: &Ctx<'js>, events: &GatewayRegistry) -> rquickjs::Result<R
+       response_hooks: RefCell::default(),
+       gateway_send_hooks: RefCell::default(),
+       interceptors: RefCell::default(),
++      timers: RefCell::default(),
+    })
+ }
+ 
+@@ -581,6 +588,7 @@ fn api<'js>(ctx: &Ctx<'js>, plugin: &str) -> rquickjs::Result<Object<'js>> {
+       })?,
+    )?;
+    api.set("stores", stores_object(ctx)?)?;
++   api.set("fs", files::fs_object(ctx)?)?;
+    api.set("discord", discord_object(ctx, plugin)?)?;
+    api.set(
+       "fetch",
+diff --git a/crates/runtime/src/js/timers.rs b/crates/runtime/src/js/timers.rs
+new file mode 100644
+index 0000000..8073d04
+--- /dev/null
++++ b/crates/runtime/src/js/timers.rs
+@@ -0,0 +1,113 @@
++//! `setTimeout`/`setInterval`, driven by worker threads that sleep and then
++//! fire the callback back on the engine thread, the same way `in_background`
++//! settles promises.
++
++use std::sync::atomic::{
++   AtomicU64,
++   Ordering,
++};
++
++use rquickjs::{
++   CatchResultExt,
++   Ctx,
++   Exception,
++   Function,
++   function::Opt,
++};
++
++use crate::js::{
++   Engine,
++   Registry,
++   drain,
++};
++
++static NEXT: AtomicU64 = AtomicU64::new(1);
++
++fn arm<'js>(
++   ctx: &Ctx<'js>,
++   callback: Function<'js>,
++   ms: u64,
++   interval: bool,
++) -> rquickjs::Result<u64> {
++   let id = NEXT.fetch_add(1, Ordering::Relaxed);
++   ctx
++      .userdata::<Registry<'js>>()
++      .ok_or_else(|| Exception::throw_internal(ctx, "no registry"))?
++      .timers
++      .borrow_mut()
++      .insert(id, (callback, interval.then_some(ms)));
++   std::thread::spawn(move || loop {
++      std::thread::sleep(std::time::Duration::from_millis(ms.max(1)));
++      let Some(engine) = crate::engine() else {
++         break;
++      };
++      if !engine.fire_timer(id) || !interval {
++         break;
++      }
++   });
++   Ok(id)
++}
++
++fn clear<'js>(ctx: &Ctx<'js>, id: Opt<u64>) -> rquickjs::Result<()> {
++   if let Some(id) = id.0 {
++      if let Some(registry) = ctx.userdata::<Registry<'js>>() {
++         registry.timers.borrow_mut().remove(&id);
++      }
++   }
++   Ok(())
++}
++
++/// `setTimeout`, `setInterval`, `clearTimeout` and `clearInterval` as globals.
++pub fn add_timer_globals<'js>(ctx: &Ctx<'js>) -> rquickjs::Result<()> {
++   let globals = ctx.globals();
++   globals.set(
++      "setTimeout",
++      Function::new(ctx.clone(), |ctx: Ctx<'js>, cb: Function<'js>, ms: Opt<u64>| {
++         arm(&ctx, cb, ms.0.unwrap_or(0), false)
++      })?,
++   )?;
++   globals.set(
++      "setInterval",
++      Function::new(ctx.clone(), |ctx: Ctx<'js>, cb: Function<'js>, ms: Opt<u64>| {
++         arm(&ctx, cb, ms.0.unwrap_or(0), true)
++      })?,
++   )?;
++   globals.set(
++      "clearTimeout",
++      Function::new(ctx.clone(), |ctx: Ctx<'js>, id: Opt<u64>| clear(&ctx, id))?,
++   )?;
++   globals.set(
++      "clearInterval",
++      Function::new(ctx.clone(), |ctx: Ctx<'js>, id: Opt<u64>| clear(&ctx, id))?,
++   )?;
++   Ok(())
++}
++
++impl Engine {
++   /// Runs timer `id`'s callback. Returns false when the timer was cleared or
++   /// is a finished one-shot, so its worker thread exits.
++   pub fn fire_timer(&self, id: u64) -> bool {
++      let repeat = self.context.with(|ctx| {
++         let Some(registry) = ctx.userdata::<Registry<'_>>() else {
++            return None;
++         };
++         let entry = registry
++            .timers
++            .borrow()
++            .get(&id)
++            .map(|(callback, interval)| (callback.clone(), *interval));
++         let Some((callback, interval)) = entry else {
++            return None;
++         };
++         if interval.is_none() {
++            registry.timers.borrow_mut().remove(&id);
++         }
++         if let Err(err) = callback.call::<_, ()>(()).catch(&ctx) {
++            log::error!("timer {id}: {err}");
++         }
++         interval
++      });
++      drain(&self.runtime);
++      repeat.is_some()
++   }
++}

@@ -4,8 +4,7 @@
 
 // adaptation: the localStorage strip/trap half is web-specific and meaningless
 // in phoenix, where the token never touches localStorage. what carries over is
-// session watching. no timers exist, so instead of polling every 5 minutes it
-// checks at startup and on demand via /sessionscheck
+// session watching, now at full parity: polls every 5 minutes on a real timer
 
 const settings = phoenix.settings.define({
   alertOnNewLocation: {
@@ -62,6 +61,9 @@ async function checkSessions(notify) {
 phoenix.on(phoenix.gateway.ready, () => {
   void checkSessions(true);
 });
+
+const poller = setInterval(() => void checkSessions(true), 5 * 60 * 1000);
+phoenix.onUnload(() => clearInterval(poller));
 
 phoenix.commands.register({
   name: "sessionscheck",

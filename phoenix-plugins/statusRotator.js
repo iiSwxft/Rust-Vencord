@@ -1,11 +1,10 @@
-// @description Cycles custom statuses, manually or paced by incoming gateway traffic
-// @version 1.0.0
+// @description Cycles custom statuses on a wall-clock interval
+// @version 2.0.0
 // @author iiSwxft
 
-// adaptation: the runtime has no timers, so the wall-clock interval is gone.
-// auto mode advances once per `every` incoming message events instead, and
-// /nextstatus steps manually. presence mode switching went through internal
-// action creators in vencord, which don't exist here, so it's custom status only
+// full parity now that the runtime has timers. presence mode switching went
+// through internal action creators in vencord, which don't exist here, so
+// it's custom status only
 
 const settings = phoenix.settings.define({
   statuses: {
@@ -18,19 +17,23 @@ const settings = phoenix.settings.define({
   auto: {
     type: "switch",
     title: "Auto-rotate",
-    description: "Advance paced by incoming message traffic",
+    description: "Advance on a wall-clock interval",
     default: false,
   },
-  every: {
+  intervalSeconds: {
     type: "number",
-    title: "Events per step",
-    description: "Advance once per this many incoming message events",
-    default: 50,
+    title: "Seconds between steps",
+    default: 60,
   },
 });
 
 let index = 0;
-let counter = 0;
+let timer = null;
+let manualOn = false;
+
+function rotating() {
+  return settings.auto || manualOn;
+}
 
 function list() {
   return settings.statuses.split("\n").map((s) => s.trim()).filter(Boolean);
@@ -49,11 +52,18 @@ async function step() {
   index++;
 }
 
-phoenix.on(phoenix.gateway.messageCreate, () => {
-  if (!settings.auto) return;
-  if (++counter % Math.max(1, Math.round(settings.every)) !== 0) return;
-  void step();
-});
+function restartTimer() {
+  if (timer !== null) {
+    clearInterval(timer);
+    timer = null;
+  }
+  if (rotating() && list().length) {
+    timer = setInterval(() => void step(), Math.max(5, settings.intervalSeconds) * 1000);
+  }
+}
+
+// re-arm whenever settings change
+phoenix.on(phoenix.gateway.ready, restartTimer);
 
 phoenix.commands.register({
   name: "nextstatus",
@@ -68,3 +78,29 @@ phoenix.commands.register({
     ctx.reply(`status set to "${items[(index - 1 + items.length) % items.length]}"`);
   },
 });
+
+phoenix.commands.register({
+  name: "rotatoron",
+  description: "Start the wall-clock rotation",
+  execute(_args, ctx) {
+    manualOn = true;
+    restartTimer();
+    ctx.reply("rotation started");
+  },
+});
+
+phoenix.commands.register({
+  name: "rotatoroff",
+  description: "Stop the rotation",
+  execute(_args, ctx) {
+    manualOn = false;
+    restartTimer();
+    ctx.reply("rotation stopped");
+  },
+});
+
+phoenix.onUnload(() => {
+  if (timer !== null) clearInterval(timer);
+});
+
+if (rotating()) restartTimer();

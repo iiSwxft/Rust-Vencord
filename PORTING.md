@@ -1,14 +1,24 @@
 # Vencord to Phoenix port matrix
 
-Target runtime: Sunbird (`phoenix` plugin API, QuickJS). Deployed plugins live in
-`phoenix-plugins/` and install into `%LOCALAPPDATA%\DiscordPhoenix\sunbird\plugins`
-via `PUT /plugins/<name>` on the debug shell (or file copy, loaded at startup).
+Target runtime: a **forked Sunbird** (`phoenix` plugin API, QuickJS) with two added
+primitives, built from `sunbird-ref` (a clone of sunbird-tools/sunbird) with MSVC:
 
-Constraint notes that shaped many verdicts:
+- `setTimeout`/`setInterval`/`clearTimeout`/`clearInterval` globals, worker threads
+  firing callbacks back on the engine thread
+- `phoenix.fs`: readText, readBase64, writeText, readDir, stat
+
+The fork is preserved as `runtime-fork.patch` in this repo. Build:
+`cargo build -p phoenix-loader -p phoenix-inject --profile dev-fast` (default MSVC
+toolchain), then launch Phoenix with `phoenix-inject.exe <path to phoenix.dll>` and
+`SUNBIRD_DEVTOOLS=1` for the debug shell.
+
+Deployed plugins live in `phoenix-plugins/` and install via `PUT /plugins/<name>` on
+the debug shell.
+
+Constraint notes that shaped the remaining verdicts:
 - No DOM/CSS/React: Phoenix is native Rust (gpui), so anything that patches web UI is out.
-- No timers in the sandbox: nothing can self-pace on a clock, only on events or round-trips.
 - No gateway initiation: `onSend` mutates outgoing ops 3/4 only, plugins cannot send frames.
-- No fs/crypto/TextEncoder: pure-JS implementations or impossible, per case.
+- No crypto/TextEncoder in the sandbox: pure-JS implementations or impossible, per case.
 
 ## Your enabled Vencord plugins: coverage
 
@@ -25,7 +35,7 @@ the web client and have no meaning in Phoenix).
 | MultiInstance, UnlimitedAccounts, TokenLogin | impossible, Electron process/storage tricks |
 | PresenceSpoofer | impossible, Identify op 2 unhookable |
 | BadgeFarmer | impossible, fakes telemetry through flux/native |
-| TokenImporter | blocked on fs access, needs a runtime fork |
+| TokenImporter | impossible: it reads Electron Discord's internal encrypted account vault (DPAPI + webpack modules), which does not exist in Phoenix at all |
 
 ## Ported (16)
 
@@ -36,10 +46,10 @@ the web client and have no meaning in Phoenix).
 | antiCrash | Embed firewall mutating `messageCreate`/`messageUpdate` before payloads |
 | localEdit | `enqueue` fake local edit events, entry point via message action |
 | silentDelete | REST-driven delete-rewrite, ordering guaranteed by round-trips |
-| statusRotator | Manual/event-paced stepping (`/rotatortoggle`, `/rotatornext`), no clock |
+| statusRotator | Full parity: wall-clock rotation on real timers (fork runtime) |
 | e2eEncrypt | Pure-JS AES-256-GCM + PBKDF2, byte-identical to Vencord format |
 | voiceLogger | `voiceStateUpdate` diffing, log via `/voicelog` page |
-| tokenGuard | Session-watch half only (localStorage trap is web-specific) |
+| tokenGuard | Session-watch half, full parity with 5-minute polling (fork runtime) |
 | globalSearch | REST search core via `/gsearch`, `/gsearchdms` |
 | customRpc | Custom activity injected into outgoing op 3 on send |
 | questCompleter | REST video-progress + heartbeat core, verified against `/quests/@me` |
@@ -69,10 +79,4 @@ the web client and have no meaning in Phoenix).
 | vAnalyzer | React accessory UI + webpack stores |
 | _nightcordShims | Vencord-internal i18n shim, meaningless here |
 
-## Blocked on runtime extensions (possible only by forking Sunbird's Rust crates)
 
-| Plugin | Missing primitive |
-|---|---|
-| tokenImporter | Filesystem access (scanning local installs for tokens) |
-| statusRotator auto-rotation | Timers (currently manual/event-paced instead) |
-| tokenGuard 5-min polling | Timers (currently startup + manual check instead) |
